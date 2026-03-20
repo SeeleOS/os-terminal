@@ -15,6 +15,16 @@ pub trait DrawTarget {
     fn size(&self) -> (usize, usize);
     fn begin_draw(&mut self) {}
     fn end_draw(&mut self) {}
+    fn scroll_pixels(
+        &mut self,
+        _x: usize,
+        _y: usize,
+        _width: usize,
+        _height: usize,
+        _delta_y: isize,
+    ) -> bool {
+        false
+    }
     fn draw_pixel(&mut self, x: usize, y: usize, rgb: Rgb);
 }
 
@@ -128,6 +138,12 @@ impl<D: DrawTarget> Graphic<D> {
 }
 
 impl<D: DrawTarget> Graphic<D> {
+    pub fn scroll_cells(&mut self, rows: isize, width: usize, height: usize) -> bool {
+        let (_, font_height) = self.font_manager.size();
+        let delta_y = rows * font_height as isize;
+        self.display.scroll_pixels(0, 0, width, height, delta_y)
+    }
+
     pub fn write(&mut self, row: usize, col: usize, cell: Cell) {
         if cell.placeholder {
             return;

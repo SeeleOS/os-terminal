@@ -299,11 +299,73 @@ impl TerminalBuffer {
 }
 
 impl TerminalBuffer {
+    fn detect_vertical_shift(&self) -> Option<isize> {
+        let height = self.height();
+        let width = self.width();
+
+        let start = self.start_row;
+
+        let is_unchanged = (0..height).all(|row| {
+            self.buffer[start + row].cells[..width] == self.flush_cache[row][..width]
+        });
+        if is_unchanged {
+            return None;
+        }
+
+        for shift in 1..height {
+            let moved_up = (0..height - shift).all(|row| {
+                self.buffer[start + row].cells[..width] == self.flush_cache[row + shift][..width]
+            });
+            if moved_up {
+                return Some(-(shift as isize));
+            }
+
+            let moved_down = (0..height - shift).all(|row| {
+                self.buffer[start + row + shift].cells[..width] == self.flush_cache[row][..width]
+            });
+            if moved_down {
+                return Some(shift as isize);
+            }
+        }
+
+        None
+    }
+
+    fn shift_flush_cache(&mut self, shift: isize) {
+        let height = self.height();
+        let width = self.width();
+        let blank = vec![Cell::default(); width];
+
+        if shift < 0 {
+            let shift = shift.unsigned_abs();
+            for row in 0..height.saturating_sub(shift) {
+                self.flush_cache[row] = self.flush_cache[row + shift].clone();
+            }
+            for row in height.saturating_sub(shift)..height {
+                self.flush_cache[row] = blank.clone();
+            }
+        } else if shift > 0 {
+            let shift = shift as usize;
+            for row in (shift..height).rev() {
+                self.flush_cache[row] = self.flush_cache[row - shift].clone();
+            }
+            for row in 0..shift.min(height) {
+                self.flush_cache[row] = blank.clone();
+            }
+        }
+    }
+
     pub fn flush<D>(&mut self, graphic: &mut Graphic<D>)
     where
         D: DrawTarget,
     {
         graphic.prepare_frame();
+
+        if let Some(shift) = self.detect_vertical_shift() {
+            if graphic.scroll_cells(shift, self.layout.pixel_size.0, self.layout.pixel_size.1) {
+                self.shift_flush_cache(shift);
+            }
+        }
 
         let start = self.start_row;
         let end = self.start_row + self.height();
