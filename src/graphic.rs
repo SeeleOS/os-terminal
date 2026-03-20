@@ -13,6 +13,8 @@ use crate::wallpaper::{Wallpaper, WallpaperError};
 
 pub trait DrawTarget {
     fn size(&self) -> (usize, usize);
+    fn begin_draw(&mut self) {}
+    fn end_draw(&mut self) {}
     fn draw_pixel(&mut self, x: usize, y: usize, rgb: Rgb);
 }
 
@@ -105,6 +107,12 @@ impl<D: DrawTarget> Graphic<D> {
             let display_size = self.display.size();
             wallpaper.ensure_scaled(display_size);
         }
+
+        self.display.begin_draw();
+    }
+
+    pub fn finish_frame(&mut self) {
+        self.display.end_draw();
     }
 
     pub(crate) fn background_pixel(&self, _x: usize, _y: usize, fallback: Rgb) -> Rgb {

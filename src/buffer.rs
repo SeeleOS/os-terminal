@@ -317,6 +317,8 @@ impl TerminalBuffer {
                 }
             }
         }
+
+        graphic.finish_frame();
     }
 
     pub fn full_flush<D>(&mut self, graphic: &mut Graphic<D>)
@@ -351,6 +353,8 @@ impl TerminalBuffer {
                 graphic.draw_pixel(x, y, background_pixel);
             }
         }
+
+        graphic.finish_frame();
     }
 }
 
