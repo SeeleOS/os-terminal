@@ -305,9 +305,8 @@ impl TerminalBuffer {
 
         let start = self.start_row;
 
-        let is_unchanged = (0..height).all(|row| {
-            self.buffer[start + row].cells[..width] == self.flush_cache[row][..width]
-        });
+        let is_unchanged = (0..height)
+            .all(|row| self.buffer[start + row].cells[..width] == self.flush_cache[row][..width]);
         if is_unchanged {
             return None;
         }

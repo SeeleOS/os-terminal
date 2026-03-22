@@ -224,6 +224,21 @@ impl<D: DrawTarget> Terminal<D> {
         self.inner.auto_flush = auto_flush;
     }
 
+    pub fn clear(&mut self) {
+        let show_cursor = self.inner.mode.contains(TerminalMode::SHOW_CURSOR);
+        if show_cursor {
+            self.inner.cursor_handler(false);
+        }
+
+        self.inner.clear_screen(ClearMode::All);
+
+        if show_cursor {
+            self.inner.cursor_handler(true);
+        }
+
+        self.inner.auto_flush.then(|| self.flush());
+    }
+
     pub fn set_logger(&mut self, logger: fn(fmt::Arguments)) {
         self.inner.logger = Some(logger);
     }
@@ -996,6 +1011,98 @@ impl<D: DrawTarget> Handler for TerminalInner<D> {
 
     fn pop_keyboard_modes(&mut self, to_pop: u16) {
         log!(self, "Unhandled pop keyboard modes: {}", to_pop);
+    }
+}
+
+#[cfg(test)]
+mod clear_tests {
+    use alloc::boxed::Box;
+
+    use super::Terminal;
+    use crate::cell::{Cell, Flags};
+    use crate::color::Rgb;
+    use crate::font::{ContentInfo, FontManager, Rasterized};
+    use crate::graphic::DrawTarget;
+
+    const EMPTY_RASTER_ROW: [u8; 1] = [0];
+    const EMPTY_RASTER: [&[u8]; 1] = [&EMPTY_RASTER_ROW];
+    const CURSOR_FLAGS: Flags = Flags::CURSOR_BLOCK
+        .union(Flags::CURSOR_UNDERLINE)
+        .union(Flags::CURSOR_BEAM);
+
+    struct TestFont;
+
+    impl FontManager for TestFont {
+        fn size(&self) -> (usize, usize) {
+            (1, 1)
+        }
+
+        fn rasterize(&mut self, _: ContentInfo) -> Rasterized<'_> {
+            Rasterized::GraySlice(&EMPTY_RASTER)
+        }
+    }
+
+    struct TestDisplay {
+        size: (usize, usize),
+    }
+
+    impl DrawTarget for TestDisplay {
+        fn size(&self) -> (usize, usize) {
+            self.size
+        }
+
+        fn draw_pixel(&mut self, _: usize, _: usize, _: Rgb) {}
+    }
+
+    fn terminal(width: usize, height: usize) -> Terminal<TestDisplay> {
+        Terminal::new(
+            TestDisplay {
+                size: (width, height),
+            },
+            Box::new(TestFont),
+        )
+    }
+
+    #[test]
+    fn clear_resets_screen_and_cursor() {
+        let mut terminal = terminal(4, 2);
+
+        terminal.process(b"abcd\r\nef");
+        terminal.clear();
+
+        assert_eq!(terminal.inner.cursor.row, 0);
+        assert_eq!(terminal.inner.cursor.column, 0);
+
+        let expected = Cell::default();
+        let cursor_cell = terminal.inner.buffer.row_mut(0)[0];
+        assert_eq!(cursor_cell.content, expected.content);
+        assert_eq!(cursor_cell.foreground, expected.foreground);
+        assert_eq!(cursor_cell.background, expected.background);
+        assert!(cursor_cell.flags.intersects(CURSOR_FLAGS));
+
+        for row in 0..terminal.rows() {
+            for col in 0..terminal.columns() {
+                if row == 0 && col == 0 {
+                    continue;
+                }
+                assert_eq!(terminal.inner.buffer.row_mut(row)[col], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn clear_preserves_hidden_cursor_state() {
+        let mut terminal = terminal(3, 2);
+
+        terminal.process(b"\x1b[?25labc");
+        terminal.clear();
+
+        let expected = Cell::default();
+        for row in 0..terminal.rows() {
+            for col in 0..terminal.columns() {
+                assert_eq!(terminal.inner.buffer.row_mut(row)[col], expected);
+            }
+        }
     }
 }
 
