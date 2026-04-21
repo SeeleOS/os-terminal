@@ -23,6 +23,6 @@ pub use graphic::DrawTarget;
 pub use keyboard::KeyboardEvent;
 pub use mouse::{MouseButton, MouseInput};
 pub use palette::Palette;
-pub use terminal::{ClipboardHandler, Terminal};
+pub use terminal::{ClipboardHandler, CursorPosition, Terminal};
 #[cfg(feature = "wallpaper")]
 pub use wallpaper::WallpaperError;

@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::mem::swap;
 use core::ops::RangeInclusive;
 use core::time::Duration;
@@ -81,8 +82,15 @@ struct Cursor {
     shape: CursorShape,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPosition {
+    pub row: usize,
+    pub column: usize,
+}
+
 pub struct Terminal<D: DrawTarget> {
     performer: Processor<DummySyncHandler>,
+    pending_input: Vec<u8>,
     inner: TerminalInner<D>,
 }
 
@@ -134,7 +142,11 @@ impl<D: DrawTarget> Terminal<D> {
         inner.apply_layout_change();
 
         let performer = Processor::new();
-        Self { performer, inner }
+        Self {
+            performer,
+            pending_input: Vec::new(),
+            inner,
+        }
     }
 
     pub fn rows(&self) -> usize {
@@ -145,18 +157,69 @@ impl<D: DrawTarget> Terminal<D> {
         self.inner.buffer.width()
     }
 
+    pub fn cursor_position(&self) -> CursorPosition {
+        CursorPosition {
+            row: self.inner.cursor.row,
+            column: self.inner.cursor.column,
+        }
+    }
+
     pub fn flush(&mut self) {
         self.inner.buffer.flush(&mut self.inner.graphic);
     }
 
     pub fn process(&mut self, bstr: &[u8]) {
         self.inner.cursor_handler(false);
-        self.performer.advance(&mut self.inner, bstr);
+
+        let mut input = Vec::with_capacity(self.pending_input.len() + bstr.len());
+        input.extend_from_slice(&self.pending_input);
+        input.extend_from_slice(bstr);
+        self.pending_input.clear();
+
+        let mut start = 0;
+        let mut index = 0;
+        while index + 4 <= input.len() {
+            if input[index..].starts_with(b"\x1b[!p") {
+                if start < index {
+                    self.performer
+                        .advance(&mut self.inner, &input[start..index]);
+                }
+                self.inner.soft_reset();
+                index += 4;
+                start = index;
+                continue;
+            }
+
+            index += 1;
+        }
+
+        let keep = soft_reset_prefix_suffix_len(&input[start..]);
+        let end = input.len() - keep;
+        if start < end {
+            self.performer.advance(&mut self.inner, &input[start..end]);
+        }
+        if keep > 0 {
+            self.pending_input.extend_from_slice(&input[end..]);
+        }
+
         if self.inner.mode.contains(TerminalMode::SHOW_CURSOR) {
             self.inner.cursor_handler(true);
         }
         self.inner.auto_flush.then(|| self.flush());
     }
+}
+
+fn soft_reset_prefix_suffix_len(buffer: &[u8]) -> usize {
+    const SOFT_RESET: &[u8] = b"\x1b[!p";
+
+    let max_len = buffer.len().min(SOFT_RESET.len() - 1);
+    for len in (1..=max_len).rev() {
+        if buffer[buffer.len() - len..] == SOFT_RESET[..len] {
+            return len;
+        }
+    }
+
+    0
 }
 
 impl<D: DrawTarget> Terminal<D> {
@@ -400,6 +463,26 @@ impl<D: DrawTarget> TerminalInner<D> {
             self.saved_cursor = self.cursor;
             self.attribute_template = Cell::default();
         }
+    }
+
+    fn soft_reset(&mut self) {
+        self.log_message(format_args!("Soft reset"));
+
+        let in_alt_screen = self.mode.contains(TerminalMode::ALT_SCREEN);
+        self.cursor = Cursor::default();
+        self.saved_cursor = self.cursor;
+        self.attribute_template = Cell::default();
+        self.scroll_region = 0..=(self.buffer.height() - 1);
+        self.mode = TerminalMode::default();
+        if in_alt_screen {
+            self.mode.insert(TerminalMode::ALT_SCREEN);
+        }
+        let crnl_mapping = self.keyboard.crnl_mapping;
+        self.keyboard = KeyboardManager::default();
+        self.keyboard.crnl_mapping = crnl_mapping;
+        self.mouse = MouseManager::default();
+        self.charsets = Default::default();
+        self.active_charset = CharsetIndex::default();
     }
 }
 
@@ -988,11 +1071,16 @@ impl<D: DrawTarget> Handler for TerminalInner<D> {
     }
 
     fn text_area_size_pixels(&mut self) {
-        log!(self, "Unhandled text area size pixels!");
+        let (width, height) = self.graphic.size();
+        self.pty_write(&format!("\x1b[4;{};{}t", height, width));
     }
 
     fn text_area_size_chars(&mut self) {
-        log!(self, "Unhandled text area size chars!");
+        self.pty_write(&format!(
+            "\x1b[8;{};{}t",
+            self.buffer.height(),
+            self.buffer.width()
+        ));
     }
 
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
@@ -1017,6 +1105,8 @@ impl<D: DrawTarget> Handler for TerminalInner<D> {
 #[cfg(test)]
 mod clear_tests {
     use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use std::sync::{Arc, Mutex};
 
     use super::Terminal;
     use crate::cell::{Cell, Flags};
@@ -1063,6 +1153,15 @@ mod clear_tests {
         )
     }
 
+    fn capture_pty_output(terminal: &mut Terminal<TestDisplay>) -> Arc<Mutex<Vec<u8>>> {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        terminal.set_pty_writer(Box::new(move |data| {
+            captured.lock().unwrap().extend_from_slice(data.as_bytes());
+        }));
+        output
+    }
+
     #[test]
     fn clear_resets_screen_and_cursor() {
         let mut terminal = terminal(4, 2);
@@ -1103,6 +1202,49 @@ mod clear_tests {
                 assert_eq!(terminal.inner.buffer.row_mut(row)[col], expected);
             }
         }
+    }
+
+    #[test]
+    fn soft_reset_homes_cursor_before_device_status_report() {
+        let mut terminal = terminal(4, 3);
+        let output = capture_pty_output(&mut terminal);
+
+        terminal.process(b"ab\r\nc");
+        terminal.process(b"\x1b[!p\x1b[6n");
+
+        assert_eq!(&*output.lock().unwrap(), b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn soft_reset_sequence_can_span_multiple_process_calls() {
+        let mut terminal = terminal(4, 3);
+        let output = capture_pty_output(&mut terminal);
+
+        terminal.process(b"ab\r\nc");
+        terminal.process(b"\x1b[!");
+        terminal.process(b"p\x1b[6n");
+
+        assert_eq!(&*output.lock().unwrap(), b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn text_area_size_chars_reports_terminal_dimensions() {
+        let mut terminal = terminal(4, 3);
+        let output = capture_pty_output(&mut terminal);
+
+        terminal.process(b"\x1b[18t");
+
+        assert_eq!(&*output.lock().unwrap(), b"\x1b[8;3;4t");
+    }
+
+    #[test]
+    fn text_area_size_pixels_reports_display_dimensions() {
+        let mut terminal = terminal(4, 3);
+        let output = capture_pty_output(&mut terminal);
+
+        terminal.process(b"\x1b[14t");
+
+        assert_eq!(&*output.lock().unwrap(), b"\x1b[4;3;4t");
     }
 }
 

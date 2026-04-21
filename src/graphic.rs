@@ -102,7 +102,7 @@ impl<D: DrawTarget> Graphic<D> {
     fn has_wallpaper(&self) -> bool {
         #[cfg(feature = "wallpaper")]
         {
-            return self.wallpaper.is_some();
+            self.wallpaper.is_some()
         }
 
         #[cfg(not(feature = "wallpaper"))]
